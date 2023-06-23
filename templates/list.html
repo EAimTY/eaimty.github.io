@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+
+{% block content %}
+<a id="title" href="{{ section.permalink | safe }}">{{ section.title | safe }}</a>
+<ol id="list">
+{% for page in section.pages %}
+<li><a href="{{ page.permalink | safe }}">{{ page.title | safe }}</a></li>
+{% endfor %}
+</ol>
+{% endblock content %}
