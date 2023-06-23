@@ -1,5 +1,5 @@
 title = "EAimTY's Blog"
-base_url = "www.eaimty.com"
+base_url = "https://www.eaimty.com"
 generate_feed = true
 feed_filename = "rss.xml"
 minify_html = true
