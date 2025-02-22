@@ -1,0 +1,406 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><meta content="width=device-width,initial-scale=1.0" name=viewport><meta content=#000000 id=color_chrome name=theme-color><meta content=#000000 id=color_safari name=apple-mobile-web-app-status-bar-style><meta content="EAimTY's Blog" name=description><link rel="Shortcut Icon" href=https://www.eaimty.com/favicon.ico><link href=https://www.eaimty.com/favicon.ico rel=Bootmark><link title="EAimTY's Blog" href=https://www.eaimty.com/rss.xml rel=alternate type=application/rss+xml><style>#title,body{line-height:1.6em}body{background:#000;color:#00c000;font-size:1.2em}#container{margin:2.4em auto;width:72%}#header{text-align:center}#header>a{font-size:.96em;margin:auto 1em}#title{font-size:1.6em;font-weight:700;margin:1em auto}#date{font-style:italic}#list>li{margin:.8em auto;list-style:disc}img{max-width:100%}a{color:inherit;text-decoration:none}#content a,a:hover{text-decoration:underline}pre{padding:1em;overflow:auto;background:#1b1d16}:not(pre) >code{padding:.2em;background:#1b1d16;overflow:auto}blockquote{padding:0 1em;margin:0;border-left:.25em solid #212121}@media (max-width:600px){#container{width:88%}#header>a{margin:auto .3em}}</style><title>用 Rust 写一个用于 OCR 的 Telegram Bot - EAimTY's Blog</title><body><div id=header><a href=https://www.eaimty.com>EAimTY's Blog</a><a href=https://www.eaimty.com/about/>About</a><a href=https://www.eaimty.com/friends/>Friends</a></div><div id=container><a href=https://www.eaimty.com/2021/create-a-telegram-bot-for-ocr-in-rust/ id=title>用 Rust 写一个用于 OCR 的 Telegram Bot</a><div id=date>2021-08-09</div><div id=content><p>最近一段时间在学 Rust，想写一些简单的小工具来巩固一下。之前用其它语言写过 Telegram bot，所以我就用 Rust 写 Telegram bot 吧。<p>Rust 相比于其它流行的语言网络上的资源比较少，中文内容更是寥寥无几。虽然我的 Rust 连入门都谈不上，代码里可能会有不少不合理的地方，但是还是想把过程记录一下，供他人参考，希望可以为 Rust 社区做一些微不足道的贡献，也算是抛砖引玉吧。<p>成品 bot 在 <a href=https://github.com/EAimTY/eaimty_bot>EAimTY/eaimty_bot</a>。这是个用来练手的小项目，不止有 OCR 功能，还有一些其它的杂七杂八的功能。<h1 id=she-ji-luo-ji>设计逻辑</h1><p>先来设计一下这个 OCR bot 的逻辑：<p>用户通过 <code>/ocr</code> 命令触发流程开始，bot 以一条带按钮的消息要求选择 OCR 的目标语言回复触发消息，在用户选择目标语言后显示选择的语言并提供“重新选择”选项，bot 接收用户回复的消息，如果收到的是图片就用 Tesseract 进行处理，最后发送 OCR 结果，整个流程结束。 在整个流程中需要确保只有触发流程开始的用户才可以通过点击按钮选择 OCR 目标语言，并且只接受触发流程开始的用户发送的图片。<p>整理一下，整个流程分为 3 个部分：<code>/ocr</code> 命令触发，处理用户点击按钮选择语言，处理用户发送的图片。 由于每个步骤之间都是独立的，因此需要引入 session 保存状态。<h1 id=xuan-ze-kuang-jia-yu-ku>选择框架与库</h1><p>用 Rust 实现的 Bot API 框架列表可以在 Telegram 官方的 <a href=https://core.telegram.org/bots/samples#rust>Bot Code Examples#Rust</a> 中找到。<p>其中的 <a href=https://docs.rs/carapax>carapax</a> 基于另一个框架 <a href=https://docs.rs/tgbot>tgbot</a> ，是同一个作者的作品，加了一些杂七杂八的功能方便开箱即用。写这个简单的 OCR bot 用不到那么多组件，所以我直接用了 tgbot。<p>对于 OCR，最好的开源实现肯定是 <a href=https://github.com/tesseract-ocr/tesseract>Tesseract</a>。Tesseract 在 Rust 下的 binding 有 <a href=https://docs.rs/tesseract>tesseract</a> 和 <a href=https://docs.rs/leptess>leptess</a>，我这里用的是 leptess。<p>编译 Bot 程序的机器上必须装 Tesseract、Leptonica 和 clang，否则会编译失败。运行 Bot 程序的机器上必须装 Tesseract（<strong>与编译的机器上必须是同一大版本</strong>） 和需要 OCR 的 Tesseract 数据包，比如 eng、jpn、chi_sim 和 chi_tra。<p>有了 Telegram Bot API 框架和 OCR 库，就可以开始动手了。<h1 id=shi-xian-session-cun-chu>实现 session 存储</h1><p>在写 bot handler 前，先要把 session 部分搓出来，后面才能用 session 保存 OCR 流程的状态。<h2 id=ding-yi-zhi-chi-de-ocr-yu-yan>定义支持的 OCR 语言</h2><p>假设这个 OCR bot 支持 4 种语言：English、日本語、简体中文、繁體中文。对应的 Tesseract 的语言包名是 "eng"、"jpn"、"chi_sim"、"chi_tra"。为了把两者联系起来并且方便存储，定义一个枚举：<pre class=language-rust data-lang=rust><code class=language-rust data-lang=rust>#[derive(Clone, Copy)]
+enum Language {
+    English,
+    Japanese,
+    SimplifiedChinese,
+    TraditionalChinese,
+}
+
+impl Language {
+    // 语言的数据包名称
+    const ENG: &'static str = "eng";
+    const JPN: &'static str = "jpn";
+    const CHI_SIM: &'static str = "chi_sim";
+    const CHI_TRA: &'static str = "chi_tra";
+
+    fn from_tesseract_data_str(s: &str) -> Option&LTSelf> {
+        match s {
+            Self::ENG => Some(Self::English),
+            Self::JPN => Some(Self::Japanese),
+            Self::CHI_SIM => Some(Self::SimplifiedChinese),
+            Self::CHI_TRA => Some(Self::TraditionalChinese),
+            _ => None,
+        }
+    }
+
+    fn as_tesseract_data_str(&self) -> &'static str {
+        match self {
+            Self::English => Self::ENG,
+            Self::Japanese => Self::JPN,
+            Self::SimplifiedChinese => Self::CHI_SIM,
+            Self::TraditionalChinese => Self::CHI_TRA,
+        }
+    }
+
+    // 用来遍历所有支持语言的迭代器，之后生成语言选择键盘的时候会用到
+    fn iter() -> impl Iterator&LTItem = Self> {
+        [
+            Self::English,
+            Self::Japanese,
+            Self::SimplifiedChinese,
+            Self::TraditionalChinese,
+        ]
+        .into_iter()
+    }
+}
+
+// 语言的显示名称
+impl Display for Language {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let lang_name = match self {
+            Self::English => "English",
+            Self::Japanese => "日本語",
+            Self::SimplifiedChinese => "简体中文",
+            Self::TraditionalChinese => "繁體中文",
+        };
+
+        write!(f, "{lang_name}")
+    }
+}
+</code></pre><h2 id=she-ji-session>设计 session</h2><p>怎么区分每个 OCR 流程的会话？最简单的就是用触发 “/ocr” 命令的 tg 消息的 id 了。用 <code>[chat_id, message_id]</code> 就可以保证会话标识的唯一性。<p>但是这里有个问题：用户点击语言选择按钮时，可以通过按钮所依附消息的 <code>reply_to</code> 属性得到最初触发 OCR 流程的命令信息的 id，也就是上面的 <code>message_id</code>。但是在后面用户回复要识别的图片时，bot 收到的消息的 <code>reply_to</code> 属性不是 <code>message_id</code>，而是要求用户选择语言的消息的 id，这里叫它 <code>relay_id</code>。想要通过 <code>relay_id</code> 得到 <code>message_id</code>，就需要某种映射：建立一个 <code>HashMap<[i64; 2], i64></code>，其中 key 是 <code>[chat_id, relay_id]</code>，value 是 <code>message_id</code>，这样就能解决这个问题了。<p>session 里需要存什么？首先是触发 “/ocr” 命令的 tg 用户 id，用来验证点击选择语言按钮和发送图片的的用户。然后是用户选择的目标语言，用户可能还没有选择语言，所以要用 <code>Option</code> 包起来抽象。<p>综上，session 的存储结构就出来了：<pre class=language-rust data-lang=rust><code class=language-rust data-lang=rust>struct SessionPool {
+    sessions: HashMap<[i64; 2], Session>,
+    relay: HashMap<[i64; 2], i64>,
+}
+
+struct Session {
+    user: i64,
+    lang: Option&LTLanguage>,
+}
+</code></pre><h2 id=la-ji-hui-shou>垃圾回收</h2><p>试想你的 bot 受到了洪泛，有一大堆触发但没有完成的 OCR 流程 session。虽然每条 session 需要的存储空间很小，但迟早还是会爆内存，所以肯定需要定时清理长时间没有完成的 session。 给 <code>Session</code> 加两个成员，顺便加上用来创建的关联函数：<pre class=language-rust data-lang=rust><code class=language-rust data-lang=rust>struct Session {
+    user: i64,
+    lang: Option&LTLanguage>,
+
+    // session 的创建时间，垃圾回收时，如果检查到这个 session 已经存在超过了设定的时间，就把它清理掉
+    c_time: Instant, 
+
+    // 用来存储在 `SessionPool` 的 `relay` 表中对应的记录的键名。垃圾回收时也同时要清除掉。在用户点击语言选择按钮前， bot 不知道自己发出的语言选择消息的 id，这时的值是 `None`。点击选择语言按钮后，值变成 `Some([chat_id, relay_id])`
+    relay: Option<[i64; 2]>, 
+}
+
+impl Session {
+    fn new(user_id: i64) -> Self {
+        Self {
+            user: user_id,
+            lang: None,
+            relay: None,
+            c_time: Instant::now(),
+        }
+    }
+}
+</code></pre><p>这样就能写出垃圾回收方法：<pre class=language-rust data-lang=rust><code class=language-rust data-lang=rust>impl SessionPool {
+    fn collect_garbage(&mut self, lifetime: Duration) {
+        self.sessions.retain(|_, Session { c_time, relay, .. }| {
+            // 创建时间与现在的时间差超过 lifetime 的删掉，`relay` 表里的也别忘记删
+            if c_time.elapsed() < lifetime {
+                true
+            } else {
+                relay.map(|relay| self.relay.remove(&relay));
+                false
+            }
+        });
+    }
+}
+</code></pre><p>需要每隔一段时间就运行一次上面的垃圾回收方法。 bot handler 处理每个 update，以及垃圾回收都是并行的，所以要包成 <code>Arc&LTMutex&LTSessionPool>></code> 防止数据竞争。 写出<code>SessionPool</code> 的创建函数：<pre class=language-rust data-lang=rust><code class=language-rust data-lang=rust>impl SessionPool {
+    fn new() -> Arc&LTMutex&LTSelf>> {
+        let pool = Arc::new(Mutex::new(Self {
+            sessions: HashMap::new(),
+            relay: HashMap::new(),
+        }));
+
+        let lifetime = Duration::from_secs(3600); // session 存在的最长时间
+        let gc_period = Duration::from_secs(3); // session 垃圾回收的间隔
+
+        let mut interval = time::interval(gc_period);
+
+        let pool_for_gc = pool.clone();
+
+        // spawn 出去一个 task，每隔 `gc_period` 时间运行一次垃圾回收
+        tokio::spawn(async move {
+            loop {
+                interval.tick().await;
+
+                let mut pool = pool_for_gc.lock().await;
+                pool.collect_garbage(lifetime);
+            }
+        });
+
+        pool
+    }
+}
+</code></pre><p>需要注意，这里的 <code>Mutex</code> 不是必须要用 tokio 的异步版本，因为只有涉及到 I/O 操作的需要长时间等待才推荐用异步锁，对于其它情况，异步锁的 await 过程反而会增加开销。推荐用 <a href=https://docs.rs/parking_lot>parking_lot</a> 库里的锁。<h1 id=bot-yu-handler>bot 与 handler</h1><h2 id=da-hao-kuang-jia>搭好框架</h2><p>tgbot 这个框架用起来特别简单。 为了方便，错误处理用了 <code>anyhow::Result</code>。<pre class=language-rust data-lang=rust><code class=language-rust data-lang=rust>#[tokio::main]
+async fn main() {
+    let token = "TG_BOT_API_TOKEN"; // 这里是 bot 的 api token
+    let api = Api::new(token).unwrap();
+    LongPoll::new(api.clone(), Handler::new(api)).run().await;
+}
+
+#[derive(Clone)]
+struct Handler {
+    api: Arc&LTApi>,
+    pool: Arc&LTMutex&LTSessionPool>>,
+}
+
+impl Handler {
+    fn new(api: Api) -> Self {
+        Self {
+            api: Arc::new(api),
+            pool: SessionPool::new(),
+        }
+    }
+}
+
+impl UpdateHandler for Handler {
+    type Future = BoxFuture<'static, ()>;
+
+    fn handle(&self, update: Update) -> Self::Future {
+        let cx = self.clone();
+
+        Box::pin(async move {
+            let res = match update.kind {
+                UpdateKind::CallbackQuery(cb_query) => {
+                    handle_ocr_callback_query(&cx, &cb_query).await
+                }
+                // bot 的命令也算一条 message，所以处理触发命令和用户回复的图片都在这个分支。从 `Message` 尝试转换成 `Command` 过程会消耗 `Message` 本身，所以在 `handle_ocr_message()` 处理完并且没有匹配到操作时再尝试转换成 `Command` 交给 `handle_ocr_command()`
+                // 这里用了不稳定特性 `try block`，把两个 handler 的结果合并成一个 `Result<()>`。自己手写 match 也能达到一样的效果，只是写出来有点丑而已
+                UpdateKind::Message(msg) => try {
+                    if !handle_ocr_message(&cx, &msg).await? {
+                        if let Ok(cmd) = Command::try_from(msg) {
+                            handle_ocr_command(&cx, &cmd).await?
+                        }
+                    }
+                }
+                _ => Ok(()),
+            };
+
+            // 遇到错误时打印到 stderr
+            if let Err(err) = res {
+                eprintln!("{err}");
+            }
+        })
+    }
+}
+
+// 处理收到的命令的 handler
+async fn handle_ocr_command(cx: &Handler, cmd: &Command) -> Result<()> {
+    todo!()
+}
+
+// 处理收到的消息附加键盘点击时的 callback query 的 handler
+async fn handle_ocr_callback_query(cx: &Handler, cb_query: &CallbackQuery) -> Result<()> {
+    todo!()
+}
+
+// 处理收到的所有消息的 handler，只有消息发送方用户对应了 session，并且消息是图片并回复了要求用户选择语言的消息，此时返回 `Ok(true)`，没有匹配成功的话返回 `Ok(false)`
+async fn handle_ocr_message(cx: &Handler, msg: &Message) -> Result&LTbool> {
+    todo!()
+}
+</code></pre><h2 id=chu-li-shou-dao-de-ming-ling>处理收到的命令</h2><pre class=language-rust data-lang=rust><code class=language-rust data-lang=rust>async fn handle_ocr_command(cx: &Handler, cmd: &Command) -> Result<()> {
+    if cmd.get_name() == "/ocr" {
+        let msg = cmd.get_message();
+
+        if let Some(user_id) = msg.get_user_id() {
+            let chat_id = msg.get_chat_id();
+            let msg_id = msg.id;
+
+            let mut pool = cx.pool.lock().await;
+            let session = Session::new(user_id);
+            pool.sessions.insert([chat_id, msg_id], session);
+
+            let send_message = SendMessage::new(chat_id, "请选择 OCR 目标语言")
+                .reply_markup(get_lang_select_keyboard())
+                .reply_to_message_id(msg_id);
+
+            drop(pool);
+
+            cx.api.execute(send_message).await?;
+        }
+    }
+
+    Ok(())
+}
+</code></pre><p>这里注意中间的 <code>drop(pool)</code>。在执行涉及耗时长 I/O 的异步操作前先把锁释放掉，否则在 bot 与 telegram 服务器通讯的整个过程里锁都是被独占并堵住的。<h2 id=chu-li-shou-dao-de-xiao-xi-fu-jia-jian-pan-dian-ji-shi-de-callback-query>处理收到的消息附加键盘点击时的 callback query</h2><p>下面可以看出 Rust 的解构能力和抽象能力非常强，而且是零成本的。<pre class=language-rust data-lang=rust><code class=language-rust data-lang=rust>async fn handle_ocr_callback_query(cx: &Handler, cb_query: &CallbackQuery) -> Result<()> {
+    if let CallbackQuery {
+        id,
+        from: user,
+        message: Some(msg),
+        data: Some(cb_data),
+        ..
+    } = cb_query
+    {
+        if let (Some(data), Some(cmd_msg)) = (parse_callback_data(cb_data), &msg.reply_to) {
+            let cmd_msg_id = cmd_msg.id;
+            let msg_id = msg.id;
+            let chat_id = msg.get_chat_id();
+            let user_id = user.id;
+
+            let mut pool = cx.pool.lock().await;
+
+            if let Some(session) = pool.sessions.get_mut(&[chat_id, cmd_msg_id]) {
+                if session.user == user_id {
+                    let edit_message = if let CallbackData::Select(lang) = data {
+                        session.lang = Some(lang);
+                        session.relay = Some([chat_id, msg_id]);
+                        pool.relay.insert([chat_id, msg_id], cmd_msg_id);
+
+                        EditMessageText::new(
+                            chat_id,
+                            msg_id,
+                            format!("目标语言：{lang}，请以需要识别的图片回复此条消息（以图片方式发送）"),
+                        )
+                        .reply_markup(get_lang_unselect_keyboard())
+                    } else {
+                        session.lang = None;
+
+                        EditMessageText::new(chat_id, msg_id, "请选择 OCR 目标语言")
+                            .reply_markup(get_lang_select_keyboard())
+                    };
+
+                    let answer_callback_query = AnswerCallbackQuery::new(id);
+
+                    drop(pool);
+
+                    tokio::try_join!(
+                        cx.api.execute(edit_message),
+                        cx.api.execute(answer_callback_query)
+                    )?;
+                } else {
+                    drop(pool);
+
+                    let answer_callback_query = AnswerCallbackQuery::new(id)
+                        .text("不是命令触发者")
+                        .show_alert(true);
+
+                    cx.api.execute(answer_callback_query).await?;
+                }
+            } else {
+                drop(pool);
+
+                let answer_callback_query = AnswerCallbackQuery::new(id)
+                    .text("找不到会话")
+                    .show_alert(true);
+
+                cx.api.execute(answer_callback_query).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// 把收到操作抽象为一个枚举：选择语言和取消选择
+enum CallbackData {
+    Select(Language),
+    Unselect,
+}
+
+// 解析 callback query 携带的字符串
+fn parse_callback_data(data: &str) -> Option&LTCallbackData> {
+    let mut data = data.split('-');
+
+    if let (Some("ocr"), Some(target), None) = (data.next(), data.next(), data.next()) {
+        if target == "unselect" {
+            return Some(CallbackData::Unselect);
+        } else if let Some(lang) = Language::from_tesseract_data_str(target) {
+            return Some(CallbackData::Select(lang));
+        }
+    }
+
+    None
+}
+
+// 生成选择语言列表按钮
+fn get_lang_select_keyboard() -> InlineKeyboardMarkup {
+    let vec = Language::iter()
+        .map(|lang| {
+            vec![InlineKeyboardButton::new(
+                lang.to_string(),
+                InlineKeyboardButtonKind::CallbackData(format!(
+                    "ocr-{}",
+                    lang.as_tesseract_data_str()
+                )),
+            )]
+        })
+        .collect();
+
+    InlineKeyboardMarkup::from_vec(vec)
+}
+
+// 生成重新选择语言按钮
+fn get_lang_unselect_keyboard() -> InlineKeyboardMarkup {
+    let vec = vec![vec![InlineKeyboardButton::new(
+        "重新选择",
+        InlineKeyboardButtonKind::CallbackData(String::from("ocr-unselect")),
+    )]];
+
+    InlineKeyboardMarkup::from_vec(vec)
+}
+</code></pre><h2 id=chu-li-shou-dao-de-xiao-xi>处理收到的消息</h2><pre class=language-rust data-lang=rust><code class=language-rust data-lang=rust>async fn handle_ocr_message(cx: &Handler, msg: &Message) -> Result&LTbool> {
+    if let (MessageData::Photo { data, .. }, Some(user_id), Some(relay_msg)) =
+        (&msg.data, msg.get_user_id(), msg.reply_to.as_ref())
+    {
+        let msg_id = msg.id;
+        let chat_id = msg.get_chat_id();
+        let relay_msg_id = relay_msg.id;
+
+        let mut pool = cx.pool.lock().await;
+
+        if let Some(cmd_msg_id) = pool.relay.get(&[chat_id, relay_msg_id]).copied() {
+            if let Some(Session {
+                user,
+                lang: Some(lang),
+                ..
+            }) = pool.sessions.get(&[chat_id, cmd_msg_id])
+            {
+                if user_id == *user {
+                    let lang = *lang;
+
+                    pool.sessions.remove(&[chat_id, cmd_msg_id]);
+                    pool.relay.remove(&[chat_id, relay_msg_id]);
+
+                    drop(pool); // 及早释放掉锁，越早越好
+
+                    let PhotoSize { file_id, .. } = unsafe {
+                        data.iter()
+                            .max_by(|a, b| (a.width, a.height).cmp(&(b.width, b.height)))
+                            .unwrap_unchecked()
+                    }; // 根据 telegram bot 的文档，返回的图片文件列表不可能为空，所以这里 unwrap 是安全的，可以直接用 unchecked 的 unwrap 减少开销
+
+                    let get_file = GetFile::new(file_id);
+
+                    if let File {
+                        file_path: Some(path),
+                        ..
+                    } = cx.api.execute(get_file).await?
+                    {
+                        let mut stream = cx.api.download_file(path).await?;
+
+                        let mut pic = Vec::new();
+
+                        while let Some(chunk) = stream.next().await {
+                            pic.put_slice(&chunk?);
+                        }
+
+                        let mut leptess = LepTess::new(None, lang.as_tesseract_data_str())?;
+                        leptess.set_image_from_mem(&pic)?;
+                        let res = leptess.get_utf8_text()?;
+
+                        let send_message =
+                            SendMessage::new(chat_id, res).reply_to_message_id(msg_id);
+
+                        cx.api.execute(send_message).await?;
+                    } else {
+                        let send_message =
+                            SendMessage::new(chat_id, "图片获取失败").reply_to_message_id(msg_id);
+
+                        cx.api.execute(send_message).await?;
+                    }
+
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    Ok(false)
+}
+</code></pre><p>到此为止，我们用四百行代码就写出了一个安全、高性能的 OCR telegram bot。我把全部代码放到了 gist 一份： <a href=https://gist.github.com/EAimTY/451f7d48ade325777303b7d062039eb9>https://gist.github.com/EAimTY/451f7d48ade325777303b7d062039eb9</a></div><div id=comments-issue-id style=display:none>46</div><style>#comment-header,#comment-list>li{margin:1em auto}#comment-avatar,#comment-tip{margin:auto .2em}#comment-action-avatar,#comment-avatar{width:1em;height:1em}#comment-action-info>*,#comment-action-input>*,#comment-info>*{display:inline-block;vertical-align:middle}#comment-header{font-size:1.6em;font-weight:700;line-height:1.6em}#comment-tip{font-style:italic}#comment-list{list-style:none;padding:0}#comment-action-author,#comment-author{font-weight:700;margin:auto .4em}#comment-datetime{font-size:.8em;font-style:italic}#comment-body{margin:auto 1.8em}#comment-action-info>*{margin:1em .2em}#comment-action-input{height:2em;width:100%;margin:1em auto}#comment-action-input>*{height:100%;margin:0 .2em}#comment-action-textarea{width:calc(100% - 8em)}#comment-action-post{width:6em}#comment-action-login{margin:1em .3em}</style><ol id=comment-list></ol><div id=comment-action></div><script>const y=e=>{var t=/\\([\\\|`*_{}\[\]()#+\-~])/g,n=/\n *&gt; *([^]*?)(?=(\n|$){2})/g,i=/\n( *)(?:[*\-+]|((\d+)|([a-z])|[A-Z])[.)]) +([^]*?)(?=(\n|$){2})/g,o=/(^|[^A-Za-z\d\\])(([*_])|(~)|(\^)|(--)|(\+\+)|`)(\2?)([^<]*?)\2\8(?!\2)(?=\W|_|$)/g,a=/^.*\n( *\|( *:?-+:?-+:? *\|)* *\n|)/,c=/.*\n/g,m=/\||(.*?[^\\])\|/g;const l=(t,n)=>{e=e.replace(t,n)},d=(e,t)=>"<"+e+">"+t+"</"+e+">",r=e=>e.replace(n,((e,t)=>d("blockquote",r(u(t.replace(/^ *&gt; */gm,"")))))),s=e=>e.replace(i,((e,t,n,i,o,a)=>(e=d("li",u(a.split(RegExp("\n ?"+t+"(?:(?:\\d+|[a-zA-Z])[.)]|[*\\-+]) +","g")).map(s).join("</li><li>"))),"\n"+(n?'<ol start="'+(i?n+'">':parseInt(n,36)-9+'" style="list-style-type:'+(o?"low":"upp")+'er-alpha">')+e+"</ol>":d("ul",e))))),u=e=>e.replace(o,((e,t,n,i,o,a,c,m,l,r)=>t+d(i?l?"strong":"em":o?l?"s":"sub":a?"sup":c?"small":m?"big":"code",u(r))));var p=[],h=0;return e="\n"+e+"\n",l(/</g,"&lt;"),l(/>/g,"&gt;"),l(/\t|\r|\uf8ff/g,"  "),e=r(e),l(/^([*\-=_] *){3,}$/gm,"<hr/>"),e=s(e),l(/<\/(ol|ul)>\n\n<\1>/g,""),l(/\n((```|~~~).*\n?([^]*?)\n?\2|((    .*?\n)+))/g,((e,t,n,i,o)=>(p[--h]=d("pre",d("code",i||o.replace(/^    /gm,""))),h+""))),l(/((!?)\[(.*?)\]\((.*?)( ".*")?\)|\\([\\`*_{}\[\]()#+\-.!~]))/g,((e,n,i,o,a,c,m)=>(p[--h]=a?i?'<img src="'+a+'" alt="'+o+'"/>':'<a href="'+a+'">'+u(o).replace(t,"$1")+"</a>":m,h+""))),l(/&lt;(.*?)&gt;/g,((e,n)=>'<a href="'+n+'">'+u(n).replace(t,"$1")+"</a>")),l(/\n(( *\|.*?\| *\n)+)/g,((e,n)=>{var i=n.match(a)[1];return"\n"+d("table",n.replace(c,((e,n)=>e==i?"":d("tr",e.replace(m,((e,o,a)=>a?d(i&&!n?"th":"td",u(o||"").replace(t,"$1")):""))))))})),l(/(?=^|>|\n)([>\s]*?)(#{1,6}) (.*?)( #*)? *(?=\n|$)/g,((e,n,i,o)=>n+d("h"+i.length,u(o).replace(t,"$1")))),l(/(?=^|>|\n)\s*\n+([^<]+?)\n+\s*(?=\n|<|$)/g,((e,n)=>d("p",u(n).replace(t,"$1")))),l(/-\d+\uf8ff/g,(e=>p[parseInt(e,10)])),e.trim()},f=e=>{let t=t=>e.next(t),n=t=>e.throw(t);return new Promise(((i,o)=>{let a=e=>{e.done?i(e.value):Promise.resolve(e.value).then(t,n).then(a,o)};a(e.next())}))};let g;const m=document.getElementById("comments-issue-id").innerText,n=new URL(window.location.href);let q,p=n.searchParams.get("github_access_token");p&&(document.cookie=`github_access_token=${p};Path=/;Secure;SameSite=Strict`,n.searchParams.delete("github_access_token"),window.location.replace(n)),null!=p||(p=null==(q=document.cookie.split(";").find((e=>e.trim().startsWith("github_access_token="))))?void 0:q.trim().substring(20));const r=()=>{document.cookie="github_access_token=;expires=Thu, 01 Jan 1970 00:00:00 GMT;Path=/;Secure;SameSite=Strict",p=null},t=()=>f(function*(){var e;let n;if(g=JSON.parse(null!=(n=null==(e=document.getElementById("comments-addition"))?void 0:e.innerText)?n:"[]"),p){if(200!==(e=yield fetch(`https://comments.eaimty.com/comments?issue_id=${m}&github_access_token=${p}`,{method:"GET"})).status)return r(),yield t()}else e=yield fetch(`https://comments.eaimty.com/comments?issue_id=${m}`,{method:"GET"});200===e.status&&(g=g.concat(yield e.json()))}()),u=()=>{g.sort(((e,t)=>new Date(e.created_at).getTime()-new Date(t.created_at).getTime()));let e=document.getElementById("comment-list");e.innerHTML="";var t=document.createElement("div");for(t.id="comment-header",t.innerText="Comments",e.appendChild(t),0===g.length&&((t=document.createElement("div")).id="comment-tip",t.innerText="No comment yet",e.appendChild(t)),t=0;t<g.length;t++){let o=document.createElement("li");var n=document.createElement("div");n.id="comment-info";var i=document.createElement("img");i.id="comment-avatar",i.src=g[t].user.avatar_url,n.appendChild(i),(i=document.createElement("a")).id="comment-author",i.innerText=g[t].user.login,g[t].user.html_url&&(i.href=g[t].user.html_url),n.appendChild(i),(i=document.createElement("div")).id="comment-datetime",i.innerText=new Date(g[t].created_at).toLocaleString(),n.appendChild(i),o.appendChild(n),(n=document.createElement("div")).id="comment-body",n.innerHTML=y(g[t].body),o.appendChild(n),e.appendChild(o)}},v=()=>f(function*(){let e=document.getElementById("comment-action");e.innerHTML="";var n=document.createElement("div");if(n.id="comment-header",n.innerText="Leave a comment",e.appendChild(n),p){if(200===(n=yield fetch(`https://comments.eaimty.com/userinfo?github_access_token=${p}`,{method:"GET"})).status){n=yield n.json();let o=document.createElement("div");o.id="comment-action-info";var i=document.createElement("img");i.id="comment-action-avatar",i.src=n.avatar_url,o.appendChild(i),(i=document.createElement("a")).id="comment-action-author",i.innerText=n.login,i.href=n.html_url,o.appendChild(i);let a=document.createElement("button");a.id="comment-action-logout",a.innerText="Logout",a.addEventListener("click",(()=>{r(),v()})),o.appendChild(a),e.appendChild(o),(n=document.createElement("div")).id="comment-tip",n.innerText="Before commenting, please think about whether your comment is meaningful? Is it related to the topic? Is it rational and friendly? If you were someone else, would you feel uncomfortable seeing this comment?",e.appendChild(n),(n=document.createElement("div")).id="comment-action-input";let c=document.createElement("textarea");c.id="comment-action-textarea",c.placeholder="Leave a comment",n.appendChild(c);let l=document.createElement("button");return l.id="comment-action-post",l.innerText="Comment",l.addEventListener("click",(()=>f(function*(){a.disabled=!0,c.disabled=!0,l.disabled=!0;let e=c.value.trim();0!==e.length&&(201===(yield fetch(`https://comments.eaimty.com/comments?issue_id=${m}&github_access_token=${p}`,{method:"POST",body:JSON.stringify({body:e})})).status?t().then((()=>u())).then((()=>v())):(r(),yield v(),window.alert("Failed to post comment")))}()))),n.appendChild(l),void e.appendChild(n)}r()}(n=document.createElement("div")).id="comment-tip",n.innerText="Clicking the login button means you agree to use cookies to store your GitHub Access Token",e.appendChild(n),(n=document.createElement("button")).id="comment-action-login",n.innerText="Login with GitHub",n.addEventListener("click",(()=>window.location.replace(`https://comments.eaimty.com/login?redirect_uri=${window.location.href}`))),e.appendChild(n)}());t().then((()=>u())).then((()=>v()))</script></div>
