@@ -4,8 +4,6 @@ path = "/friends"
 weight = 1
 +++
 
-Thanks Internet Archive Wayback Machine for bringing back my old friends' lost blogs.
-
 - [Jimmy Tian's Blog](https://www.jimmytian.com)
 - [土豆不好吃](https://dmesg.app)
 - [Tao²](https://web.archive.org/web/20201126234822/https://blog.tao.im/)
